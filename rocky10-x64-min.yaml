@@ -1,0 +1,23 @@
+#==============================================================================
+# vim: softtabstop=2 shiftwidth=2 expandtab fenc=utf-8 cc=81 tw=80
+#==============================================================================
+#
+# DESCRIPTION: Rocky Linux 10 x64 min Grid'5000 environment
+#
+#==============================================================================
+---
+extend: rocky10-x64-common.yaml
+
+global:
+  # Grid'5000 environment variant
+  g5k_variant: min
+  image_size: 10G
+  g5k_no_chroot_for_grub: "true"
+bootstrap:
+  - "@base"
+
+setup:
+  - "@base"
+
+export:
+  - "@base"

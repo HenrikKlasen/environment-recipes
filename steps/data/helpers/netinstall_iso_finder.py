@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Find the latest netinstall iso for a Debian version and system architecture."""
+
+from html.parser import HTMLParser
+from urllib.request import urlopen
+from urllib.parse import urljoin
+import re
+import sys
+import argparse
+import logging
+
+logger = logging.getLogger(__name__)
+
+class LinkParser(HTMLParser):
+    """Retrieve links (a hrefs) from a text/html document"""
+    def __init__(self, url):
+        HTMLParser.__init__(self)
+        self.url = url
+        self.links = set()
+        response = urlopen(url)
+        contentType = response.info().get('Content-Type')
+        if not contentType:
+            return
+        logger.debug("url = " + url );
+        logger.debug("contentType = " + contentType );
+        if ';' in contentType:
+            (mediaType,charset) = contentType.split(";")
+            charset = charset.split("=")[1]
+        else:
+            mediaType = contentType
+            # ISO-8859-1 is no longer the default charset, see https://tools.ietf.org/html/rfc7231#appendix-B
+            # Let's use UTF-8.
+            charset = "utf-8"
+        if mediaType =='text/html':
+            htmlBytes = response.read()
+            htmlString = htmlBytes.decode(charset)
+            self.feed(htmlString)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            for (key, value) in attrs:
+                if key == 'href':
+                    new_url = urljoin(self.url,value)
+                    if re.match("^"+self.url, new_url):
+                        self.links.add(new_url)
+
+    def get_links(self):
+        """Returns all the collected links"""
+        return self.links
+
+
+def url_find(to_visit_url_set,visited_url_set,found_url_set):
+    """Recursively look for urls given a regex, a set of urls to visit, a set of already visited urls, a set of already found urls. Returns the set of found urls"""
+    logger.debug("Progress: to_visit:{} visited:{} found:{}".format(len(to_visit_url_set),len(visited_url_set),len(found_url_set)))
+    assert(len(to_visit_url_set.intersection(visited_url_set)) == 0)
+    assert(len(to_visit_url_set.intersection(found_url_set)) == 0)
+    if (len(to_visit_url_set) == 0):
+        return [visited_url_set,found_url_set]
+    else:
+        url = to_visit_url_set.pop()
+        visited_url_set.add(url)
+        if target_regex.match(url):
+            found_url_set.add(url)
+            return url_find(to_visit_url_set, visited_url_set, found_url_set)
+        else:
+            new_url_set = set([url for url in LinkParser(url).get_links() if (logger.debug(url) or True) and url_regex.match(url)])
+            new_url_set.difference_update(visited_url_set)
+            to_visit_url_set.update(new_url_set)
+            return url_find(to_visit_url_set, visited_url_set, found_url_set)
+
+def key_normalize(version_string):
+    """"
+    In order to perform a natural sorting, we normalize the version (X.Y.Z) as a unique integer with the following formula: X*100 + Y*10 + Z
+    For instance, it solves situations where "9.9.0" is greater than "9.9.11"
+    """
+    splitted_string = version_string.split('.')
+    assert(len(splitted_string) == 3)
+    return int(splitted_string[0])*100+int(splitted_string[1])*10+int(splitted_string[2])
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=sys.modules[__name__].__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("distrib", metavar="DISTRIB", help="distribution")
+    parser.add_argument("version", metavar="VERSION", help="version")
+    parser.add_argument("arch", metavar="ARCH", help="architecture")
+    parser.add_argument("mirror", metavar="MIRROR", help="mirror", nargs="?")
+    parser.add_argument('--info', action="store_true", default=False, help='print info messages')
+    parser.add_argument('--debug', action="store_true", default=False, help='print debug messages')
+    args = parser.parse_args()
+
+    handler = logging.StreamHandler()
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+        handler.setLevel(logging.DEBUG)
+    elif args.info:
+        logger.setLevel(logging.INFO)
+        handler.setLevel(logging.INFO)
+    else:
+        logger.setLevel(logging.WARNING)
+        handler.setLevel(logging.WARNING)
+    handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    logger.addHandler(handler)
+
+    try:
+        visited = set([])
+        found = set([])
+        if (args.distrib.lower() == "debian"):
+            if args.mirror == None:
+                args.mirror = "https://cdimage.debian.org/"
+            if not re.match(r"^\d+$",args.version):
+                raise Exception("please give the Debian release number (e.g. 8 for Jessie)")
+            if args.version == '13':
+                url_regex = re.compile(r"^"+args.mirror+r"cdimage/release/(?:"+args.version+r"\.\d+\.\d+/(?:"+args.arch+r"/(?:iso-cd/(?:debian-"+args.version+r"\.\d+\.\d+-"+args.arch+r"-netinst\.iso)?)?)?)?$")
+            else:
+                url_regex = re.compile(r"^"+args.mirror+r"cdimage/archive/(?:"+args.version+r"\.\d+\.\d+/(?:"+args.arch+r"/(?:iso-cd/(?:debian-"+args.version+r"\.\d+\.\d+-"+args.arch+r"-netinst\.iso)?)?)?)?$")
+            target_regex = re.compile(r"^.*-netinst\.iso$")
+            [visited,found] = url_find(set([args.mirror+r"cdimage/"+v+r"/" for v in ["release","archive"]]), set(), set())
+        elif (args.distrib.lower() == "ubuntu"):
+            if not re.match(r"^\w+$",args.version):
+                raise Exception("please give the Ubuntu release name")
+            if (args.version.lower() == "jammy" or args.version.lower() == "noble"):
+              if (args.arch == "amd64"):
+                args.mirror = "https://releases.ubuntu.com/"
+              else:
+                args.mirror = "https://cdimage.ubuntu.com/releases/"
+              servers = set([args.mirror])
+              # regexp to also use beta releases (useful to prepare for an upcoming release)
+              # url_regex = re.compile("^"+args.mirror+args.version+"(?:/release|/beta)?/(?:ubuntu-\d+\.\d+(?:\.\d+)?(?:-beta)?-live-server-"+args.arch+"\.iso)?$")
+              url_regex = re.compile(r"^"+args.mirror+args.version+r"(?:/release)?/(?:ubuntu-\d+\.\d+(?:\.\d+)?-live-server-"+args.arch+r"\.iso)?$")
+              target_regex = re.compile(r"^.*/ubuntu-.*-live-server-\w+\.iso$")
+            else:
+              if args.mirror == None:
+                args.mirror = r"http://(?:archive|old-releases).ubuntu.com/"
+                servers = set(["http://"+s+".ubuntu.com/ubuntu/" for s in ["old-releases","archive"]])
+              else:
+                servers = set([args.mirror])
+              url_regex = re.compile(r"^"+args.mirror+r"ubuntu/dists/(?:"+args.version+r"(?:-updates)?/(?:main/(?:installer-"+args.arch+r"/(?:current/(?:(?:legacy-)?images/(?:netboot/(?:mini\.iso)?)?)?)?)?)?)?$")
+              target_regex = re.compile(r"^.*/mini\.iso$")
+            [visited,found] = url_find(servers, set(), set())
+        elif (args.distrib.lower() == "centos"):
+            if args.mirror == None:
+                args.mirror = "https://vault.centos.org/"
+            if not re.match(r"^\d+$",args.version):
+                raise Exception("please give the CentOS release number (e.g. 7 for CentOS-7)")
+            if args.version == '6':
+                url_regex = re.compile(r"^"+args.mirror+r"(?:"+args.version+r"(?:\.\d+)?/(?:isos/(?:"+args.arch+r"/(?:CentOS-"+args.version+r"(?:\.\d+)?-"+args.arch+r"-netinstall\.iso)?)?)?)?$")
+                target_regex = re.compile(r"^.*CentOS-\d+(?:\.\d+)?-\w+-netinstall\.iso$")
+            elif args.version == '7':
+                url_regex = re.compile(r"^"+args.mirror+r"(?:"+args.version+r"(?:\.\d+)*/(?:isos/(?:"+args.arch+r"/(?:CentOS-"+args.version+r"-"+args.arch+r"-NetInstall-\d+\.iso)?)?)?)?$")
+                target_regex = re.compile(r"^.*CentOS-\d+-\w+-NetInstall-\d+\.iso$")
+            else:
+                url_regex = re.compile(r"^"+args.mirror+r"(?:"+args.version+r"(?:\.\d+)*/(?:isos/(?:"+args.arch+r"/(?:CentOS-"+args.version+r"\.\d+\.\d+-"+args.arch+r"-boot\.iso)?)?)?)?$")
+                target_regex = re.compile(r"^.*CentOS-\d+\.\d+\.\d+-\w+-boot\.iso$")
+            [visited,found] = url_find(set([args.mirror]), set(), set())
+        elif (args.distrib.lower() == "centos-stream"):
+            if not re.match(r"^\d+$",args.version):
+                raise Exception("please give the CentOS Stream release number (e.g. 8)")
+            if args.version == '8':
+                if args.mirror == None:
+                    args.mirror = "https://vault.centos.org/"
+                url_regex = re.compile(r"^"+args.mirror+r"(?:"+args.version+r"-stream/(?:isos/(?:"+args.arch+r"/(?:CentOS-Stream-"+args.version+r"-\d+\.\d-"+args.arch+r"-boot\.iso)?)?)?)?$")
+                target_regex = re.compile(r"^.*CentOS-Stream-\d+-\d+\.\d+-\w+-boot\.iso$")
+            else:
+                if args.mirror == None:
+                    args.mirror = "http://mirror.stream.centos.org/"
+                url_regex = re.compile(r"^"+args.mirror+r"(?:"+args.version+r"-stream/(?:BaseOS/(?:"+args.arch+r"/(?:iso/(?:CentOS-Stream-"+args.version+r"-latest-"+args.arch+r"-boot\.iso)?)?)?)?)?$")
+                target_regex = re.compile(r"^.*CentOS-Stream-\d+-latest-\w+-boot\.iso$")
+
+            [visited,found] = url_find(set([args.mirror]), set(), set())
+        elif (args.distrib.lower() == "rocky"):
+            if args.mirror == None:
+                args.mirror = "https://mirror.in2p3.fr/linux/rocky/"
+            if not re.match(r"^\d+$",args.version):
+                raise Exception("please give the Rocky Linux release number (e.g. 8 for Rocky Linux 8, or 9)")
+            if args.version not in ['8', '9', '10']:
+                raise Exception("Unsupported version %s of Rocky Linux." % args.version)
+            else:
+                url_regex = re.compile(r"^"+args.mirror+r"(?:"+args.version+r"/(?:isos/(?:"+args.arch+r"/(?:Rocky-"+args.version+r"\.\d+-"+args.arch+r"-boot\.iso)?)?)?)?$")
+                target_regex = re.compile(r"^.*Rocky-\d+\.\d+-\w+-boot\.iso$")
+            [visited,found] = url_find(set([args.mirror]), set(), set())
+        elif (args.distrib.lower() == "almalinux"):
+            if args.mirror == None:
+                args.mirror = "https://mirror.in2p3.fr/linux/almalinux/"
+            if not re.match(r"^\d+$",args.version):
+                raise Exception("please give the Alma Linux release number (e.g. 9 for Alma Linux 9)")
+            if args.version not in ['9']:
+                raise Exception("Unsupported version %s of Alma Linux." % args.version)
+            else:
+                url_regex = re.compile(r"^"+args.mirror+r"(?:"+args.version+r"/(?:isos/(?:"+args.arch+r"/(?:AlmaLinux-"+args.version+r"\.\d+-"+args.arch+r"-boot\.iso)?)?)?)?$")
+                target_regex = re.compile(r"^.*AlmaLinux-\d+\.\d+-\w+-boot\.iso$")
+            [visited,found] = url_find(set([args.mirror]), set(), set())
+        else:
+            raise Exception("this distribution is not supported")
+        logger.info("URL regex: "+url_regex.pattern)
+        logger.info("Target regex: "+target_regex.pattern)
+        logger.debug("Visited URLs:")
+        for url in visited:
+            logger.debug(url)
+        logger.info("Found URLs:")
+        for url in found:
+            logger.info(url)
+        if len(found) > 0:
+            if (args.distrib.lower() == "debian"):
+                print(sorted(found,key=lambda x:key_normalize(re.sub(r".*/debian-(\d+).(\d+).(\d+)-"+args.arch+r"-netinst\.iso$",r"\1.\2.\3",x)),reverse=True)[0])
+            else:
+                print(sorted(found, reverse=True)[0])
+        else:
+            raise Exception("no url found")
+    except Exception as exc:
+        sys.stderr.write(u"Error: %s\n" % exc)
+        sys.exit(1)
